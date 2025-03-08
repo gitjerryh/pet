@@ -39,7 +39,7 @@ last_frame_time = 0
 frame_timeout = 5  # 5秒没有新帧就重启摄像头
 
 # 监控摄像头性能的变量
-frame_times = []
+frame_times = []  # 用于FPS计算的帧时间列表
 fps_stats = {"current": 0, "min": 0, "max": 0, "avg": 0}
 stats_lock = threading.Lock()
 latest_frame = None  # 存储最新的帧
@@ -130,37 +130,36 @@ def init_camera():
             try:
                 picam2 = Picamera2()
                 
-                # 保持原有分辨率
+                # 降回到640x480分辨率，保持RGB格式
                 config = picam2.create_video_configuration(
                     main={
                         "size": (640, 480),
-                        "format": "RGB888"  # 使用RGB格式
+                        "format": "RGB888"
                     },
-                    buffer_count=4,  # 增加缓冲区数量
+                    buffer_count=2,  # 减少缓冲以降低延迟
                     controls={
                         "FrameDurationLimits": (33333, 33333),  # 约30fps
-                        "AwbEnable": True,     # 保持自动白平衡
-                        "AwbMode": 1,          # 使用日光模式
-                        "Brightness": 0.1,      # 轻微提高亮度
-                        "Contrast": 1.0,        # 默认对比度
-                        "Saturation": 1.1,      # 轻微提高饱和度
-                        "Sharpness": 1.0,       # 默认锐度
-                        "ExposureValue": 0.2,   # 曝光补偿
-                        "ColourGains": (1.4, 1.2),  # 更温和的红绿增益
-                        "NoiseReductionMode": 0  # 禁用噪声减少以提高性能
+                        "AwbEnable": True,
+                        "AwbMode": 0,          # 自动
+                        "Brightness": 0.2,     # 减少亮度避免闪烁
+                        "Contrast": 1.2,       # 保持合理对比度
+                        "Saturation": 1.2,     # 保持合理饱和度
+                        "Sharpness": 1.0,      # 恢复默认锐度
+                        "ExposureTime": 0,     # 自动曝光
+                        "ExposureValue": 0.4,  # 降低曝光补偿减少闪烁
+                        "AnalogueGain": 1.5,   # 降低增益减少闪烁
+                        "NoiseReductionMode": 0  # 关闭降噪提高性能
                     }
                 )
                 
                 picam2.configure(config)
-                time.sleep(0.5)  # 减少等待时间
+                time.sleep(0.5)
                 
                 picam2.start()
                 logger.info(f"摄像头初始化成功 (尝试 {attempt+1}/3)")
                 
-                # 丢弃前几帧
-                for _ in range(5):  # 减少丢弃的帧数
-                    picam2.capture_array()
-                    time.sleep(0.03)
+                # 减少等待时间
+                time.sleep(0.5)
                 
                 last_frame_time = time.time()
                 return True
@@ -178,279 +177,249 @@ def init_camera():
         logger.error(f"初始化摄像头过程中发生错误: {e}")
         return False
 
-def adjust_colors_fast(frame):
-    """使用查找表快速调整颜色"""
+def enhance_frame(frame):
+    """简单高效的帧增强函数，减少闪烁"""
     try:
         if frame is None or frame.size == 0:
             return None
             
-        # 使用OpenCV的split/LUT/merge操作，这些操作经过高度优化
-        b, g, r = cv2.split(frame)
-        b = cv2.LUT(b, b_lut)
-        r = cv2.LUT(r, r_lut)
+        # 使用简单的亮度对比度调整，不再分离通道
+        alpha = 1.2  # 对比度
+        beta = 15    # 亮度
+        frame = cv2.convertScaleAbs(frame, alpha=alpha, beta=beta)
         
-        # 使用优化的合并操作
-        adjusted = cv2.merge([b, g, r])
-        
-        # 使用查找表进行亮度和对比度调整，避免逐像素计算
-        adjusted = cv2.LUT(adjusted, alpha_beta_lut)
-        
-        return adjusted
-        
+        return frame
     except Exception as e:
-        logger.error(f"快速颜色调整出错: {e}")
+        logger.error(f"帧增强错误: {e}")
         return frame
 
-# 预先创建时间戳字体和位置
-font = cv2.FONT_HERSHEY_SIMPLEX
-font_scale = 0.5
-font_color = (255, 255, 255)  # 白色
-font_thickness = 1
-text_position = (10, 20)
-
-def add_timestamp(frame):
-    """优化的时间戳添加函数，显示时间戳和FPS"""
-    global last_timestamp, last_timestamp_update
-    
-    current_time = time.time()
-    
-    # 每秒更新一次时间戳文本
-    if current_time - last_timestamp_update >= timestamp_update_interval:
-        last_timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        last_timestamp_update = current_time
-    
-    # 获取当前FPS
-    with stats_lock:
-        current_fps = fps_stats["current"]
-    fps_text = f"FPS: {current_fps:.1f}"
-    
-    # 获取文本大小
-    timestamp_size = cv2.getTextSize(last_timestamp, font, font_scale, font_thickness)[0]
-    fps_size = cv2.getTextSize(fps_text, font, font_scale, font_thickness)[0]
-    
-    # 计算背景区域（包含时间戳和FPS）
-    bg_rect_x1 = text_position[0] - 5
-    bg_rect_y1 = text_position[1] - timestamp_size[1] - 5
-    bg_rect_x2 = text_position[0] + max(timestamp_size[0], fps_size[0]) + 5
-    bg_rect_y2 = text_position[1] + fps_size[1] + 10  # 增加高度以容纳FPS
-    
-    # 绘制半透明背景
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (bg_rect_x1, bg_rect_y1), (bg_rect_x2, bg_rect_y2), (0, 0, 0), -1)
-    
-    # 合并半透明背景 (70% 透明度)
-    alpha = 0.7
-    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-    
-    # 添加时间戳文本
-    cv2.putText(frame, last_timestamp, text_position, font, font_scale, font_color, font_thickness)
-    
-    # 添加FPS文本（在时间戳下方）
-    fps_position = (text_position[0], text_position[1] + fps_size[1] + 5)
-    cv2.putText(frame, fps_text, fps_position, font, font_scale, font_color, font_thickness)
-    
-    return frame
-
 def update_fps_stats(frame_time):
-    global fps_stats
+    """计算并更新FPS统计信息"""
+    global fps_stats, frame_times
     with stats_lock:
-        # 保留最近5帧的时间，减少计算量
+        # 保留最近10帧的时间，减少计算量
         frame_times.append(frame_time)
-        if len(frame_times) > 5:
+        if len(frame_times) > 10:
             frame_times.pop(0)
             
         # 计算FPS
         if len(frame_times) > 1:
-            # 使用更简单的FPS计算方法
-            if len(frame_times) >= 2:
-                elapsed = frame_times[-1] - frame_times[0]
-                if elapsed > 0:
-                    fps = (len(frame_times) - 1) / elapsed
-                    
-                    fps_stats["current"] = fps
-                    if fps_stats["min"] == 0 or fps < fps_stats["min"]:
-                        fps_stats["min"] = fps
-                    if fps > fps_stats["max"]:
-                        fps_stats["max"] = fps
-                    # 使用简单平均而不是加权平均
-                    fps_stats["avg"] = fps
+            # 使用简单的FPS计算方法
+            elapsed = frame_times[-1] - frame_times[0]
+            if elapsed > 0:
+                fps = (len(frame_times) - 1) / elapsed
+                
+                fps_stats["current"] = fps
+                if fps_stats["min"] == 0 or fps < fps_stats["min"]:
+                    fps_stats["min"] = fps
+                if fps > fps_stats["max"]:
+                    fps_stats["max"] = fps
+                # 使用简单平均
+                fps_stats["avg"] = fps
 
 def process_frame(frame):
-    """集中处理帧的函数，便于测量性能"""
-    start_time = time.time()
+    """简化的帧处理函数，解决闪烁问题"""
+    try:
+        if frame is None or frame.size == 0:
+            return None
+            
+        # 检查帧的形状和格式
+        if len(frame.shape) != 3:
+            logger.error(f"帧格式错误: 形状 {frame.shape}")
+            return None
+            
+        # 简单的亮度和对比度增强，保持一致性
+        frame = enhance_frame(frame)
+        
+        # 添加时间戳和FPS信息
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        
+        # 获取当前FPS
+        with stats_lock:
+            current_fps = fps_stats["current"]
+        fps_text = f"FPS: {current_fps:.1f}"
+        
+        # 添加时间戳
+        text_size = cv2.getTextSize(current_time, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+        cv2.rectangle(frame, (10, 10), (10 + text_size[0], 10 + text_size[1] + 5), (0, 0, 0), -1)
+        cv2.putText(frame, current_time, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # 添加FPS信息
+        fps_text_size = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+        cv2.rectangle(frame, (10, 35), (10 + fps_text_size[0], 35 + fps_text_size[1] + 5), (0, 0, 0), -1)
+        cv2.putText(frame, fps_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        return frame
+    except Exception as e:
+        logger.error(f"处理帧出错: {e}")
+        return None
+
+def is_valid_frame(frame):
+    """快速帧验证，减少处理时间提高帧率"""
+    if frame is None or frame.size == 0:
+        return False
     
-    # 1. 颜色调整
-    adjusted = adjust_colors_fast(frame)
-    
-    # 2. 添加时间戳 - 修改为每一帧都添加时间戳
-    adjusted = add_timestamp(adjusted)
-    
-    # 记录处理时间（仅用于调试）
-    if frame_counter % 30 == 0:  # 每30帧记录一次
-        process_time = (time.time() - start_time) * 1000
-        logger.debug(f"帧处理时间: {process_time:.2f}ms")
-    
-    return adjusted
+    try:
+        # 仅执行基本检查，减少处理时间
+        # 检查帧形状
+        if len(frame.shape) != 3:
+            return False
+        
+        # 只检查图像部分区域以加速处理
+        # 从中心取样本区域
+        h, w = frame.shape[:2]
+        center_y, center_x = h // 2, w // 2
+        sample_size = 50  # 采样区域大小
+        
+        sample = frame[
+            max(0, center_y - sample_size):min(h, center_y + sample_size),
+            max(0, center_x - sample_size):min(w, center_x + sample_size)
+        ]
+        
+        # 快速检查样本区域
+        avg_value = np.mean(sample)
+        if avg_value < 5:  # 几乎全黑
+            return False
+            
+        # 快速检查颜色分布
+        std_value = np.std(sample)
+        if std_value < 3:  # 几乎单色
+            return False
+            
+        return True
+    except Exception as e:
+        logger.error(f"帧验证错误: {e}")
+        return False
 
 def capture_continuous():
-    """优化的帧捕获函数"""
+    """优化的帧捕获函数，专注于提高帧率和稳定性"""
     global picam2, running, latest_frame, last_frame_time, frame_counter
     
     logger.info("开始后台帧捕获线程")
-    last_successful_capture = time.time()
     
-    # 动态调整捕获速率
-    target_interval = 1.0/30.0  # 开始尝试30fps
-    skip_frames = 0
+    # 记录性能数据
+    frame_times = []
     
     while running:
         try:
-            current_time = time.time()
-            
-            # 丢帧以控制CPU使用
-            if skip_frames > 0:
-                skip_frames -= 1
-                time.sleep(0.01)
-                continue
-                
             if picam2 is None:
                 if not init_camera():
                     time.sleep(1)
                     continue
-                
+            
+            # 开始计时
+            frame_start_time = time.time()
+            
             try:
+                # 尽量减少锁的持有时间
                 with camera_lock:
                     if picam2 is None:
                         continue
                     frame = picam2.capture_array()
                 
                 if frame is not None and frame.size > 0:
-                    # 增加帧计数器
                     frame_counter += 1
                     
-                    # 处理帧 (使用优化后的处理函数)
+                    # 每一帧都做相同处理，保持一致性
                     processed_frame = process_frame(frame)
                     
                     if processed_frame is not None:
+                        # 更新帧数据
                         with frame_lock:
                             latest_frame = processed_frame
-                            last_frame_time = current_time
-                            update_fps_stats(current_time)
-                    
-                    # 编码和缓存帧，在客户端需要时可以重用
-                    if frame_counter % 2 == 0:  # 每2帧缓存一次
+                            last_frame_time = time.time()
+                            update_fps_stats(time.time())
+                        
+                        # 编码缓存
                         encode_and_cache_frame(processed_frame)
+                        
+                        # 记录帧处理时间
+                        frame_times.append(time.time() - frame_start_time)
+                        if len(frame_times) > 30:
+                            # 每30帧记录一次平均处理时间
+                            avg_time = sum(frame_times) / len(frame_times)
+                            logger.debug(f"平均帧处理时间: {avg_time*1000:.1f}ms，约等于 {1/avg_time:.1f}fps")
+                            frame_times = []
                     
-                    last_successful_capture = current_time
-                
-                    # 动态调整跳帧
-                    with stats_lock:
-                        current_fps = fps_stats["current"]
-                        if current_fps < 15:  # 帧率太低，减少处理量
-                            skip_frames = 0  # 不跳帧
-                        elif current_fps > 25:  # 帧率足够，可以偶尔跳过一帧
-                            skip_frames = 1
+                    # 动态休眠控制帧率
+                    elapsed = time.time() - frame_start_time
+                    if elapsed < 0.03:  # 目标30+fps
+                        # 非常短的休眠以节省CPU，同时保持高帧率
+                        time.sleep(0.001)
                 
             except Exception as e:
                 logger.error(f"捕获帧异常: {e}")
-                if current_time - last_successful_capture > 10:
-                    logger.warning("长时间无法捕获帧，重置摄像头")
-                    with camera_lock:
-                        reset_camera()
-                    last_successful_capture = current_time
                 time.sleep(0.1)
-                continue
                 
         except Exception as e:
             logger.error(f"帧捕获线程错误: {e}")
             time.sleep(0.1)
 
 def encode_and_cache_frame(frame):
-    """将帧编码并缓存，供多个客户端使用"""
-    global encoded_frames_cache, frame_cache_index
+    """简化的帧编码函数，提高一致性"""
+    global encoded_frames_cache
     
     if frame is None:
         return
         
     try:
-        # 维持原有的JPEG质量
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]
+        # 固定的JPEG质量
+        encode_params = [cv2.IMWRITE_JPEG_QUALITY, 85]
         ret, buffer = cv2.imencode('.jpg', frame, encode_params)
         
         if ret:
             with encoded_frames_cache_lock:
-                # 初始化缓存
-                if len(encoded_frames_cache) < frame_cache_size:
-                    encoded_frames_cache.append({"time": time.time(), "data": buffer})
-                else:
-                    # 更新缓存中最旧的帧
-                    encoded_frames_cache[frame_cache_index] = {"time": time.time(), "data": buffer}
-                    frame_cache_index = (frame_cache_index + 1) % frame_cache_size
+                # 单帧缓存，确保最新
+                encoded_frames_cache = [{"time": time.time(), "data": buffer}]
     except Exception as e:
         logger.error(f"编码缓存帧出错: {e}")
 
 def get_cached_frame():
-    """获取缓存中最新的帧"""
+    """获取缓存帧"""
     with encoded_frames_cache_lock:
         if not encoded_frames_cache:
             return None
-            
-        # 找到最新的缓存帧
-        newest_index = 0
-        newest_time = 0
-        
-        for i, frame_data in enumerate(encoded_frames_cache):
-            if frame_data["time"] > newest_time:
-                newest_time = frame_data["time"]
-                newest_index = i
-                
-        return encoded_frames_cache[newest_index]["data"]
+        return encoded_frames_cache[0]["data"]
 
 def generate_frames():
-    """优化的帧生成器函数"""
-    global running, last_client_time, active_clients, latest_frame, last_frame_time
-    client_frame_time = time.time()
-    client_id = time.time()  # 生成唯一客户端ID
-    
-    # 控制每个客户端的帧率，不同客户端可以错开发送时间
-    target_interval = 1.0/20.0  # 目标20fps
+    """优化的帧生成器，提高帧率和减少闪烁"""
+    global running, active_clients
+    client_id = time.time()
+    target_interval = 1.0 / 30.0  # 目标30fps
     
     with clients_lock:
         active_clients += 1
         logger.info(f"客户端 {client_id:.2f} 连接，当前活跃客户端: {active_clients}")
     
     try:
+        last_frame_time = time.time()
         while running:
-            current_time = time.time()
-            
-            # 帧率控制
-            if current_time - client_frame_time < target_interval:
-                time.sleep(0.001)  # 短暂睡眠以降低CPU使用
-                continue
+            try:
+                # 保持固定间隔发送帧
+                now = time.time()
+                time_to_wait = target_interval - (now - last_frame_time)
                 
-            client_frame_time = current_time
-            
-            # 首先检查是否有可用的缓存帧
-            buffer = get_cached_frame()
-            
-            # 如果没有缓存帧，则实时编码一帧
-            if buffer is None:
-                with frame_lock:
-                    if latest_frame is None:
-                        time.sleep(0.01)
-                        continue
-                    
-                    frame = latest_frame.copy()
-                
-                # 编码
-                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]
-                ret, buffer = cv2.imencode('.jpg', frame, encode_params)
-                if not ret:
+                if time_to_wait > 0:
+                    # 使用极短的休眠
+                    time.sleep(0.001)
                     continue
-            
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-            
+                
+                # 重置时间
+                last_frame_time = now
+                
+                # 获取缓存帧
+                buffer = get_cached_frame()
+                if buffer is None:
+                    continue
+                
+                # 发送帧数据
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                
+            except Exception as e:
+                logger.error(f"生成帧异常: {e}")
+                time.sleep(0.03)
+                
     except Exception as e:
         logger.error(f"生成帧异常: {e}")
     finally:
@@ -650,7 +619,7 @@ def debug_info():
         return debug_html
 
 def health_check():
-    """定期检查摄像头状态和服务健康"""
+    """健康检查函数，监控和维护系统状态"""
     global picam2, running, last_frame_time
     last_check = time.time()
     
@@ -675,6 +644,28 @@ def health_check():
         # 短暂休眠以减少CPU使用
         time.sleep(1)
 
+# 在处理大量连接时动态调整性能
+def adjust_performance():
+    """根据连接数量动态调整性能"""
+    global running, active_clients, reduce_processing
+    
+    while running:
+        try:
+            with clients_lock:
+                client_count = active_clients
+                
+            # 根据客户端数量调整处理策略
+            if client_count > 3:
+                reduce_processing = True
+            else:
+                reduce_processing = False
+                
+        except Exception as e:
+            logger.error(f"性能调整错误: {e}")
+        
+        time.sleep(5)  # 每5秒检查一次
+
+# 增加主线程服务启动
 if __name__ == '__main__':
     # 记录启动时间
     service_start_time = time.time()
@@ -683,13 +674,12 @@ if __name__ == '__main__':
     try:
         logger.info(f"摄像头服务器开始启动，IP: {ip_address}")
         
-        # 在一个新线程中初始化摄像头
-        init_thread = threading.Thread(target=init_camera)
-        init_thread.daemon = True
-        init_thread.start()
-        init_thread.join()  # 等待摄像头初始化完成
+        # 初始化摄像头
+        if not init_camera():
+            logger.error("摄像头初始化失败，服务无法启动")
+            sys.exit(1)
         
-        # 启动后台帧捕获线程
+        # 启动帧捕获线程
         capture_thread = threading.Thread(target=capture_continuous)
         capture_thread.daemon = True
         capture_thread.start()
