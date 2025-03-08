@@ -9,6 +9,7 @@ import signal
 import sys
 import logging
 import socket
+import subprocess
 
 # 使用当前用户的主目录
 home_dir = os.path.expanduser("~")
@@ -599,6 +600,20 @@ def reset_camera_endpoint():
         return {"status": "success", "message": "摄像头已重置"}
     else:
         return {"status": "error", "message": "摄像头重置失败"}, 500
+
+@app.route('/restart_service', methods=['POST'])
+def restart_service_endpoint():
+    """重启整个视频流服务的API端点"""
+    try:
+        logger.info("收到重启服务请求，准备重启服务...")
+        # 这里我们创建一个独立进程来重启服务，这样当前进程可以正常返回响应
+        subprocess.Popen(['sudo', 'systemctl', 'restart', 'camera-service'], 
+                          stdout=subprocess.PIPE, 
+                          stderr=subprocess.PIPE)
+        return {"status": "success", "message": "重启服务请求已发送，服务即将重启"}
+    except Exception as e:
+        logger.error(f"重启服务失败: {e}")
+        return {"status": "error", "message": f"重启服务失败: {e}"}, 500
 
 @app.route('/debug')
 def debug_info():
