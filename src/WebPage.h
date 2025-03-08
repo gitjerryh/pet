@@ -205,7 +205,7 @@ static const char PROGMEM INDEX_HTML[] = R"rawliteral(
             <div class="controls-container">
                 <div class="button-row">
                     <button class="button" id="toggle-pi-stream">启动摄像头</button>
-                    <button class="button button4" id="reset-camera">重置摄像头</button>
+                    <button class="button button4" id="reset-camera">重启视频流服务</button>
                 </div>
                 
                 <div class="button-grid">
@@ -515,26 +515,26 @@ static const char PROGMEM INDEX_HTML[] = R"rawliteral(
             stopPiCamStream();
         }
         
-        // 重置摄像头按钮
+        // 重启视频流服务按钮
         document.getElementById('reset-camera').onclick = function() {
             if (piStreamImg.src !== '') {
-                updateConnectionStatus("正在重置摄像头...", "status-connecting");
+                updateConnectionStatus("正在重启视频流服务...", "status-connecting");
                 
-                // 发送请求到树莓派重置摄像头
-                fetch(piStreamUrl.substring(0, piStreamUrl.lastIndexOf('/')) + '/reset_camera', {
+                // 发送请求到树莓派重启视频流服务
+                fetch(piStreamUrl.substring(0, piStreamUrl.lastIndexOf('/')) + '/restart_service', {
                     method: 'POST'
                 })
                 .then(response => {
-                    console.log("摄像头重置请求已发送");
-                    // 无论结果如何，重新启动流
+                    console.log("视频流服务重启请求已发送");
+                    // 等待服务重启完成后再重新连接
                     setTimeout(function() {
                         stopPiCamStream();
                         startPiCamStream();
-                    }, 2000);
+                    }, 5000); // 增加等待时间，确保服务有足够时间重启
                 })
                 .catch(error => {
-                    console.error("摄像头重置请求失败", error);
-                    updateConnectionStatus("重置失败，正在重新连接", "status-error");
+                    console.error("视频流服务重启请求失败", error);
+                    updateConnectionStatus("重启失败，正在重新连接", "status-error");
                     stopPiCamStream();
                     startPiCamStream();
                 });
